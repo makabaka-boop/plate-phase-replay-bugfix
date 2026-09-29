@@ -59,7 +59,20 @@ npm run dev                                 # http://localhost:5173
 
 ## 阶段设置
 
-请求可带 `schedule` 数组；各项包含 `step`（从 1 开始）及可选的 `boundary`、`blocked_edges`，页面提供 JSON 编辑框。
+请求可带 `schedule` 数组；各项包含 `step`（从 1 开始）及至少一项 `boundary`、`blocked_edges`：
+
+```json
+"schedule": [
+  {"step": 2, "blocked_edges": [[1, 0, 1, 1]]},
+  {"step": 3, "boundary": "fixed-zero"},
+  {"step": 4, "boundary": "insulated", "blocked_edges": []}
+]
+```
+
+- 设置在**所指时间步开始前生效**：`step: 3` 的设置用于从第 2 帧推进到第 3 帧；更早的帧不受影响。
+- `boundary`：从该步起切换边界模式（之后一直有效，直到被后续条目再次修改）。
+- `blocked_edges`：从该步起**整体替换**当前阻断边集合；传 `[]` 表示清除全部阻断边。
+- 条目可以乱序提交（按 `step` 排序执行）；同一 `step` 重复、`step` 越界、条目缺少 `step` 或不含任何可应用设置、边格式非法等一律返回 `400`。
 
 ## API
 
@@ -84,13 +97,21 @@ npm run dev                                 # http://localhost:5173
   "frames": [[["40", "0", "0"], ...], ...],
   "boundary_flow": ["0", "0", ...],
   "total_temperature": ["120", ...],
-  "blocked_edges": [[[0, 0], [0, 1]]]
+  "blocked_edges": [[[0, 0], [0, 1]]],
+  "frame_settings": [
+    {"boundary": "insulated", "blocked_edges": []},
+    {"boundary": "insulated", "blocked_edges": [[[1, 0], [1, 1]]]},
+    ...
+  ],
+  "schedule": [{"step": 2, "blocked_edges": [[[1, 0], [1, 1]]]}]
 }
 ```
 
 - `frames`：`steps+1` 帧（第 0 帧为初温），每格是精确有理数字符串；
 - `boundary_flow[t]`：第 t+1 步的边界**净**流量（正＝流向外界，负＝从环境吸热）；绝热时恒为 `"0"`；
-- `total_temperature`：每帧总温。
+- `total_temperature`：每帧总温；恒有 `total_temperature[t] - total_temperature[t+1] == boundary_flow[t]`，无论当步设置如何；
+- `frame_settings`：`steps+1` 项，`frame_settings[t]` 给出**用于产出第 t 帧**的边界模式与阻断边集合（第 0 项为初始设置）。回放、热量表（当步边界/阻断边数/总温变化）与热图阻断线均以此为准，描述同一过程；
+- 顶层 `boundary`/`blocked_edges` 始终回显**初始**设置；不带 `schedule` 的原有请求行为完全不变（`frame_settings` 各项相同且恒为初始设置）。
 
 非法输入返回 `400 {"error": "..."}`。
 
@@ -106,7 +127,7 @@ cd ui && npx playwright install chromium && npx playwright test
 
 ### 关键正确性保证
 
-1. **引擎对拍**：生产引擎按“无向内边列表”累计通量；测试中的参考模型对每格四个方向独立枚举通量（含阻断/外界判定），两者在 40 组随机矩阵 × 步数 × 阻断边 × 两种边界下逐 `Fraction` 相等。
+1. **引擎对拍**：生产引擎按“无向内边列表”累计通量；测试中的参考模型对每格四个方向独立枚举通量（含阻断/外界判定），两者在 40 组随机矩阵 × 步数 × 阻断边 × 两种边界下逐 `Fraction` 相等；另有 20 组带随机 `schedule`（中途切边界、换阻断边、乱序提交）的工况与支持阶段设置的参考模型逐帧对拍。
 2. **守恒**：绝热模式每帧总温等于初始总温；零温模式 `总温(t) - 总温(t+1) == boundary_flow[t]`。
 3. **同步更新**：每步从旧网格只读、写入新网格（单角格一步得 2、对角邻居一步仍为 0 的用例锁定该语义）。
 4. **浏览器**：逐格比对 DOM 上的 `data-value` 与服务帧浮点值；断言阻断条数量/位置；编辑后播放器整体卸载、进行中的 fetch 通过 `AbortController` + 单调请求序号作废，旧响应不可能覆盖新状态。
@@ -117,5 +138,5 @@ cd ui && npx playwright install chromium && npx playwright test
 - 「编辑阻断边」模式下点击任意内边切换阻断（粗黑条显示，上限 30）；
 - 运行后播放/暂停/步进/拖动帧、调速；
 - 点击热图格子切换该格的逐帧温度曲线（最多 8 条）；
-- 每步总温与边界净流量表格；
+- 每步总温、边界净流量、当步边界模式、阻断边数与总温变化表格（可按当步阶段设置复核）；
 - 任何编辑立即废弃当前结果与在途请求，提示重新运行。

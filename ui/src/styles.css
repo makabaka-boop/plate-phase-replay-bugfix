@@ -205,7 +205,9 @@ button:disabled {
   fill: #1f2430;
 }
 
-/* Heatmap overlay bars never swallow cell clicks. */
+/* Heatmap overlay bars never swallow cell clicks: both the root <svg> and
+   its rects are pointer-transparent (the editor overlay stays clickable). */
+[data-testid="heatmap"] .edge-layer,
 [data-testid="heatmap"] .edge {
   pointer-events: none;
 }
@@ -261,6 +263,15 @@ button:disabled {
   gap: 6px;
   font-size: 13px;
   color: var(--muted);
+}
+
+.frame-settings {
+  margin: 8px 0 4px;
+  font-size: 13px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .hint {

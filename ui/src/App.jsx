@@ -149,6 +149,21 @@ export default function App() {
       return;
     }
 
+    // Parse the schedule text before touching request state so malformed
+    // JSON surfaces as a regular inline error instead of an uncaught
+    // exception that leaves the run button unresponsive.
+    let schedule;
+    try {
+      schedule = JSON.parse(scheduleText);
+    } catch {
+      setError("阶段设置不是合法的 JSON，请检查语法后再运行");
+      return;
+    }
+    if (!Array.isArray(schedule)) {
+      setError("阶段设置必须是 JSON 数组，例如 [{\"step\": 2}]");
+      return;
+    }
+
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -165,7 +180,7 @@ export default function App() {
         b[0],
         b[1],
       ]),
-      schedule: JSON.parse(scheduleText),
+      schedule,
     };
 
     setLoading(true);
@@ -196,6 +211,29 @@ export default function App() {
     () => (result ? result.boundary_flow.map((v) => formatFrac(v, 4)) : []),
     [result]
   );
+
+  // Per-frame settings as actually applied by the engine. Older responses
+  // without frame_settings fall back to the single top-level setting, so
+  // runs against a pre-schedule server keep working unchanged.
+  const frameSettings = useMemo(() => {
+    if (!result) return [];
+    if (Array.isArray(result.frame_settings)) return result.frame_settings;
+    return Array.from({ length: result.steps + 1 }, () => ({
+      boundary: result.boundary,
+      blocked_edges: result.blocked_edges,
+    }));
+  }, [result]);
+
+  const boundaryLabel = (mode) =>
+    mode === "fixed-zero" ? "零温" : "绝热";
+  const signedDelta = (t) => {
+    if (t === 0) return "";
+    const before = Number(totals[t - 1]);
+    const after = Number(totals[t]);
+    const d = after - before;
+    if (Math.abs(d) < 1e-12) return "0";
+    return (d > 0 ? "+" : "") + formatFrac(String(d), 4);
+  };
 
   return (
     <div className="app">
@@ -305,8 +343,14 @@ export default function App() {
 
           <label className="form-row">
             阶段设置（JSON 数组）
-            <textarea data-testid="schedule-input" value={scheduleText}
-              onChange={(e) => setScheduleText(e.target.value)} />
+            <textarea
+              data-testid="schedule-input"
+              value={scheduleText}
+              onChange={(e) => {
+                setScheduleText(e.target.value);
+                markEdited();
+              }}
+            />
           </label>
 
           <div className="form-row">
@@ -372,6 +416,9 @@ export default function App() {
                       <th>时间步</th>
                       <th>总温</th>
                       <th>该步边界净流量（+ 表示流向外界）</th>
+                      <th>该步边界模式</th>
+                      <th>该步阻断边数</th>
+                      <th>总温变化</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -380,15 +427,22 @@ export default function App() {
                         <td>{t}</td>
                         <td>{total}</td>
                         <td>{t === 0 ? "—" : flows[t - 1]}</td>
+                        <td data-testid={`stats-boundary-${t}`}>
+                          {boundaryLabel(frameSettings[t].boundary)}
+                        </td>
+                        <td data-testid={`stats-blocked-${t}`}>
+                          {frameSettings[t].blocked_edges.length}
+                        </td>
+                        <td data-testid={`stats-delta-${t}`}>
+                          {t === 0 ? "—" : signedDelta(t)}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
               <p className="hint" data-testid="conservation-hint">
-                {result.boundary === "insulated"
-                  ? "绝热模式：每一步总温严格守恒。"
-                  : "零温模式：总温的减少量等于该步边界净流量。"}
+                逐步复核：绝热行的「总温变化」为 0；零温行的「总温变化」与「该步边界净流量」大小相等、符号相反。
               </p>
             </section>
           )}

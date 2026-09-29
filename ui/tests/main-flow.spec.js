@@ -255,3 +255,123 @@ test("resize drops out-of-range blocked edges and trims cells", async ({
   await page.getByTestId("run-button").click();
   await expect(page.getByTestId("player")).toBeVisible();
 });
+
+test("schedule: blocked edge appears exactly at the named step", async ({
+  page,
+  request,
+}) => {
+  const schedule = [
+    { step: 2, blocked_edges: [[1, 0, 1, 1]] },
+    { step: 3, boundary: "fixed-zero" },
+    { step: 4, boundary: "insulated" },
+  ];
+  const payload = {
+    matrix: INITIAL_MATRIX,
+    steps: 6,
+    boundary: "insulated",
+    schedule,
+  };
+  const server = await getServerFrames(request, payload);
+
+  await page
+    .getByTestId("schedule-input")
+    .fill(JSON.stringify(schedule));
+  await page.getByTestId("run-button").click();
+  await expect(page.getByTestId("player")).toBeVisible();
+
+  const bars = () =>
+    page.getByTestId("heatmap").locator("rect.edge-blocked");
+
+  // Frame 0/1 use the initial empty set: no bar yet.
+  await page.getByTestId("step-slider").fill("0");
+  await expect(bars()).toHaveCount(0);
+  await page.getByTestId("step-slider").fill("1");
+  await expect(bars()).toHaveCount(0);
+  // From frame 2 on, the scheduled block is drawn at its actual location.
+  for (const t of [2, 3, 4, 5, 6]) {
+    await page.getByTestId("step-slider").fill(String(t));
+    await expect(bars()).toHaveCount(1);
+  }
+
+  // Every displayed frame must match the exact server frame and the settings
+  // of that frame.
+  for (let t = 0; t <= 6; t++) {
+    await page.getByTestId("step-slider").fill(String(t));
+    const value = await page
+      .getByTestId("heat-1-1")
+      .getAttribute("data-value");
+    expect(Math.abs(Number(value) - frac(server.frames[t][1][1]))).toBeLessThan(
+      1e-9
+    );
+    await expect(page.getByTestId(`stats-blocked-${t}`)).toHaveText(
+      String(server.frame_settings[t].blocked_edges.length)
+    );
+    await expect(page.getByTestId(`stats-boundary-${t}`)).toHaveText(
+      server.frame_settings[t].boundary === "fixed-zero" ? "零温" : "绝热"
+    );
+  }
+
+  // Steps 1,2 are insulated: zero flow; step 3 fixed-zero: nonzero; step 4+
+  // insulated again: zero.
+  await expect(
+    page.getByTestId("stats-row-1").locator("td").nth(2)
+  ).toHaveText("0");
+  await expect(
+    page.getByTestId("stats-row-2").locator("td").nth(2)
+  ).toHaveText("0");
+  expect(
+    Number((await page.getByTestId("stats-row-3").locator("td").nth(2).textContent()).trim())
+  ).not.toBe(0);
+  await expect(
+    page.getByTestId("stats-row-4").locator("td").nth(2)
+  ).toHaveText("0");
+});
+
+test("editing the schedule invalidates the old player immediately", async ({
+  page,
+}) => {
+  await page.getByTestId("run-button").click();
+  await expect(page.getByTestId("player")).toBeVisible();
+
+  await page
+    .getByTestId("schedule-input")
+    .fill('[{"step": 2, "boundary": "fixed-zero"}]');
+  await expect(page.getByTestId("stale-hint")).toBeVisible();
+  await expect(page.getByTestId("player")).not.toBeVisible();
+  await expect(page.getByTestId("stats-panel")).not.toBeVisible();
+
+  // A valid scheduled run still works after the edit.
+  await page.getByTestId("run-button").click();
+  await expect(page.getByTestId("player")).toBeVisible();
+  await expect(page.getByTestId("frame-settings")).toContainText("第 0 帧设置");
+  await page.getByTestId("step-slider").fill("2");
+  await expect(page.getByTestId("frame-settings")).toContainText("零温边界");
+});
+
+test("malformed schedule JSON shows an error and never locks the button", async ({
+  page,
+}) => {
+  await page.getByTestId("schedule-input").fill("[{not json");
+  await page.getByTestId("run-button").click({ trial: true }); // still enabled
+  await page.getByTestId("run-button").click();
+  await expect(page.getByTestId("error-box")).toBeVisible();
+  await expect(page.getByTestId("error-box")).toContainText("JSON");
+  await expect(page.getByTestId("player")).not.toBeVisible();
+
+  // Recover: fix the JSON and run again.
+  await page.getByTestId("schedule-input").fill("[]");
+  await page.getByTestId("run-button").click();
+  await expect(page.getByTestId("player")).toBeVisible();
+  await expect(page.getByTestId("error-box")).not.toBeVisible();
+});
+
+test("server rejecting malformed schedule surfaces a 400 error", async ({
+  page,
+}) => {
+  // Syntactically valid JSON but semantically invalid for the server.
+  await page.getByTestId("schedule-input").fill('[{"step": 99}]');
+  await page.getByTestId("run-button").click();
+  await expect(page.getByTestId("error-box")).toBeVisible();
+  await expect(page.getByTestId("player")).not.toBeVisible();
+});
+

@@ -146,6 +146,18 @@ export function Player({ result, selectedCells, onToggleCell }) {
 
   const frame = result.frames[index];
 
+  // Settings actually in force for the displayed frame (the ones used by the
+  // engine to produce this frame). Fall back to the top-level set for older
+  // responses that predate frame_settings.
+  const frameSettings =
+    (result.frame_settings && result.frame_settings[index]) || null;
+  const blockedEdges = frameSettings
+    ? frameSettings.blocked_edges
+    : result.blocked_edges;
+  const boundaryMode = frameSettings
+    ? frameSettings.boundary
+    : result.boundary;
+
   return (
     <section className="panel" data-testid="player">
       <h2>热图播放</h2>
@@ -153,11 +165,24 @@ export function Player({ result, selectedCells, onToggleCell }) {
         rows={result.rows}
         cols={result.cols}
         frame={frame}
-        blockedEdges={result.blocked_edges}
+        blockedEdges={blockedEdges}
         selectedCells={selectedCells}
         onToggleCell={onToggleCell}
         stepIndex={index}
       />
+
+      <div className="frame-settings" data-testid="frame-settings">
+        <span>
+          第 {index} 帧设置：
+          {boundaryMode === "fixed-zero" ? "零温边界" : "绝热边界"} · 阻断边{" "}
+          {blockedEdges.length} 条
+        </span>
+        {index < steps && (
+          <span className="hint">
+            （以上设置在第 {index + 1} 步开始时生效，决定本帧）
+          </span>
+        )}
+      </div>
 
       <div className="player-controls">
         <button
