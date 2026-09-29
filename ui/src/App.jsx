@@ -149,6 +149,18 @@ export default function App() {
       return;
     }
 
+    let schedule;
+    try {
+      schedule = JSON.parse(scheduleText);
+    } catch {
+      setError("阶段设置不是合法 JSON：请检查语法（需要一个数组，例如 [{\"step\":2}]）");
+      return;
+    }
+    if (!Array.isArray(schedule)) {
+      setError("阶段设置必须是 JSON 数组，每项形如 {\"step\":2,\"boundary\":\"fixed-zero\"}");
+      return;
+    }
+
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -165,7 +177,7 @@ export default function App() {
         b[0],
         b[1],
       ]),
-      schedule: JSON.parse(scheduleText),
+      schedule,
     };
 
     setLoading(true);
@@ -196,6 +208,20 @@ export default function App() {
     () => (result ? result.boundary_flow.map((v) => formatFrac(v, 4)) : []),
     [result]
   );
+  // Per-frame active settings (schedules); identical across frames without one.
+  const frameSettings = useMemo(
+    () =>
+      result
+        ? result.frame_settings ??
+          Array.from({ length: result.steps + 1 }, () => ({
+            boundary: result.boundary,
+            blocked_edges: result.blocked_edges,
+          }))
+        : [],
+    [result]
+  );
+  const boundaryLabel = (mode) =>
+    mode === "fixed-zero" ? "零温" : "绝热";
 
   return (
     <div className="app">
@@ -305,8 +331,14 @@ export default function App() {
 
           <label className="form-row">
             阶段设置（JSON 数组）
-            <textarea data-testid="schedule-input" value={scheduleText}
-              onChange={(e) => setScheduleText(e.target.value)} />
+            <textarea
+              data-testid="schedule-input"
+              value={scheduleText}
+              onChange={(e) => {
+                setScheduleText(e.target.value);
+                markEdited();
+              }}
+            />
           </label>
 
           <div className="form-row">
@@ -371,24 +403,30 @@ export default function App() {
                     <tr>
                       <th>时间步</th>
                       <th>总温</th>
+                      <th>该步边界设置</th>
                       <th>该步边界净流量（+ 表示流向外界）</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {totals.map((total, t) => (
-                      <tr key={t} data-testid={`stats-row-${t}`}>
-                        <td>{t}</td>
-                        <td>{total}</td>
-                        <td>{t === 0 ? "—" : flows[t - 1]}</td>
-                      </tr>
-                    ))}
+                    {totals.map((total, t) => {
+                      const setting = frameSettings[t];
+                      const edgeCount = setting.blocked_edges.length;
+                      return (
+                        <tr key={t} data-testid={`stats-row-${t}`}>
+                          <td>{t}</td>
+                          <td>{total}</td>
+                          <td data-testid={`stats-mode-${t}`}>
+                            {boundaryLabel(setting.boundary)} · 阻断 {edgeCount} 条
+                          </td>
+                          <td>{t === 0 ? "—" : flows[t - 1]}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
               <p className="hint" data-testid="conservation-hint">
-                {result.boundary === "insulated"
-                  ? "绝热模式：每一步总温严格守恒。"
-                  : "零温模式：总温的减少量等于该步边界净流量。"}
+                逐行可复核：总温(t) − 总温(t+1) = 第 t+1 步净流量；绝热阶段总温严格守恒，零温阶段总温减少量等于净流量。
               </p>
             </section>
           )}

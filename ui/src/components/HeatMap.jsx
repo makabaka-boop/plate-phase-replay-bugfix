@@ -145,15 +145,30 @@ export function Player({ result, selectedCells, onToggleCell }) {
   }, [playing, index, steps]);
 
   const frame = result.frames[index];
+  // Per-frame blocked layout: with a schedule the overlay must follow the
+  // stage active at this frame; fall back to the run-wide list for older
+  // responses.
+  const frameSettings = result.frame_settings;
+  const frameBlockedEdges = frameSettings
+    ? frameSettings[Math.min(index, frameSettings.length - 1)].blocked_edges
+    : result.blocked_edges;
+  const frameBoundary = frameSettings
+    ? frameSettings[Math.min(index, frameSettings.length - 1)].boundary
+    : result.boundary;
 
   return (
     <section className="panel" data-testid="player">
       <h2>热图播放</h2>
+      <div className="frame-mode" data-testid="frame-mode">
+        当前帧设置：第 {index} 帧 · 边界
+        {frameBoundary === "insulated" ? "绝热 insulated" : "零温 fixed-zero"} ·
+        阻断边 {frameBlockedEdges.length} 条
+      </div>
       <HeatMap
         rows={result.rows}
         cols={result.cols}
         frame={frame}
-        blockedEdges={result.blocked_edges}
+        blockedEdges={frameBlockedEdges}
         selectedCells={selectedCells}
         onToggleCell={onToggleCell}
         stepIndex={index}

@@ -62,6 +62,44 @@ def reference_simulate(matrix, steps, boundary, blocked_edges):
     return frames, flows
 
 
+def reference_simulate_scheduled(matrix, steps, boundary0, blocked0, schedule):
+    """Reference model that applies schedule entries before their step."""
+    rows, cols = len(matrix), len(matrix[0])
+    blocked = {_edge_key(a, b) for a, b in blocked0}
+    mode = boundary0
+    by_step = {entry["step"]: entry for entry in schedule}
+    grid = [[Fraction(v) for v in row] for row in matrix]
+    frames = [[row[:] for row in grid]]
+    flows = []
+    settings = [(mode, set(blocked))]
+
+    for step in range(1, steps + 1):
+        entry = by_step.get(step, {})
+        if "boundary" in entry:
+            mode = entry["boundary"]
+        if "blocked_edges" in entry:
+            blocked = {_edge_key(a, b) for a, b in entry["blocked_edges"]}
+        delta = [[Fraction(0) for _ in range(cols)] for _ in range(rows)]
+        ext_flow = Fraction(0)
+        for r in range(rows):
+            for c in range(cols):
+                for dr, dc in DIRS:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < rows and 0 <= nc < cols:
+                        if _edge_key((r, c), (nr, nc)) in blocked:
+                            continue
+                        delta[r][c] -= (grid[r][c] - grid[nr][nc]) / 4
+                    elif mode == "fixed-zero":
+                        flux = grid[r][c] / 4
+                        delta[r][c] -= flux
+                        ext_flow += flux
+        grid = [[grid[r][c] + delta[r][c] for c in range(cols)] for r in range(rows)]
+        frames.append([row[:] for row in grid])
+        flows.append(ext_flow)
+        settings.append((mode, set(blocked)))
+    return frames, flows, settings
+
+
 def _random_case(seed):
     rng = random.Random(seed)
     rows = rng.randint(3, 6)
@@ -364,3 +402,236 @@ def test_fixed_zero_api_flow_values(client):
     data = resp.get_json()
     assert data["boundary_flow"] == ["2"]
     assert data["frames"][1][0][0] == "0"
+
+
+# ---------------------------------------------------------------------------
+# Per-stage schedule
+# ---------------------------------------------------------------------------
+
+
+SCHED_SCENARIO = {
+    "matrix": [[40, 0, 0], [40, 0, 0], [40, 0, 0]],
+    "steps": 6,
+    "boundary": "insulated",
+    "blocked_edges": [],
+    "schedule": [
+        # Step 2: block the whole seam between columns 0 and 1.
+        {"step": 2, "blocked_edges": [[0, 0, 0, 1], [1, 0, 1, 1], [2, 0, 2, 1]]},
+        # Step 3: switch to zero-temperature boundary.
+        {"step": 3, "boundary": "fixed-zero"},
+        # Step 4: restore insulation.
+        {"step": 4, "boundary": "insulated"},
+    ],
+}
+
+
+def _run_scenario():
+    params = validate_payload(SCHED_SCENARIO)
+    return simulate(**params), params
+
+
+def test_schedule_boundary_changes_apply_on_exact_step():
+    result, params = _run_scenario()
+    flows = result["boundary_flow"]
+    # Steps 1-2 insulated, step 3 fixed-zero (hot plate loses heat), steps 4-6
+    # insulated again.
+    assert flows[0] == 0
+    assert flows[1] == 0
+    assert flows[2] > 0
+    assert flows[3] == 0
+    assert flows[4] == 0
+    assert flows[5] == 0
+    # Per-step net flow always explains the per-step total change, regardless
+    # of the active boundary mode.
+    totals = result["total_temperature"]
+    for t in range(params["steps"]):
+        assert totals[t] - totals[t + 1] == flows[t]
+    # Total is conserved exactly while insulation is active.
+    assert totals[0] == totals[2]
+    assert totals[3] == totals[6]
+    # The frame-3 total drop equals the step-3 boundary loss.
+    assert totals[2] - totals[3] == flows[2]
+
+
+def test_schedule_blocked_edges_apply_on_exact_step():
+    result, params = _run_scenario()
+    frames = result["frames"]
+    # Step 1 runs with the seam OPEN: column 1 receives heat.
+    assert all(frames[1][r][1] > 0 for r in range(3))
+    # From step 2 onward the seam is closed, so column 0 keeps all its heat
+    # internally while fixed-zero may drain it via external sides only.
+    settings = result["frame_settings"]
+    assert [len(s["blocked_edges"]) for s in settings] == [
+        0, 0, 3, 3, 3, 3, 3
+    ]
+    # frame_settings[t] describes exactly the controls that produced frame t.
+    for t, setting in enumerate(settings):
+        edges = {tuple(sorted((a, b))) for a, b in setting["blocked_edges"]}
+        expected_mode = "fixed-zero" if t == 3 else "insulated"
+        assert setting["boundary"] == expected_mode
+        if t >= 2:
+            assert edges == {
+                ((0, 0), (0, 1)),
+                ((1, 0), (1, 1)),
+                ((2, 0), (2, 1)),
+            }
+
+
+def test_schedule_matches_independent_reference_model():
+    result, params = _run_scenario()
+    ref_frames, ref_flows, ref_settings = reference_simulate_scheduled(
+        params["matrix"],
+        params["steps"],
+        params["boundary"],
+        params["blocked_edges"],
+        params["schedule"],
+    )
+    assert result["frames"] == ref_frames
+    assert result["boundary_flow"] == ref_flows
+    for setting, (mode, edges) in zip(result["frame_settings"], ref_settings):
+        assert setting["boundary"] == mode
+        assert set(map(tuple, setting["blocked_edges"])) == edges
+
+
+def test_schedule_random_cases_match_reference():
+    matrix, steps, boundary, blocked, _ = _random_case(7777)
+    # Build a schedule: change boundary and blocked layout at mid steps.
+    schedule = [
+        {"step": 1, "blocked_edges": blocked[: max(1, len(blocked) // 2)]},
+        {"step": max(2, steps // 2), "boundary": (
+            "fixed-zero" if boundary == "insulated" else "insulated"
+        )},
+    ]
+    params = validate_payload(
+        {
+            "matrix": matrix,
+            "steps": steps,
+            "boundary": boundary,
+            "blocked_edges": blocked,
+            "schedule": schedule,
+        }
+    )
+    result = simulate(**params)
+    ref_frames, ref_flows, _ = reference_simulate_scheduled(
+        params["matrix"],
+        params["steps"],
+        params["boundary"],
+        params["blocked_edges"],
+        params["schedule"],
+    )
+    assert result["frames"] == ref_frames
+    assert result["boundary_flow"] == ref_flows
+
+
+def test_schedule_entry_blocked_edges_replaces_layout():
+    # An empty blocked_edges list at a later step reopens edges blocked earlier.
+    payload = {
+        "matrix": [[8, 0, 0], [8, 0, 0], [8, 0, 0]],
+        "steps": 3,
+        "boundary": "insulated",
+        "blocked_edges": [[0, 0, 0, 1], [1, 0, 1, 1], [2, 0, 2, 1]],
+        "schedule": [{"step": 2, "blocked_edges": []}],
+    }
+    params = validate_payload(payload)
+    result = simulate(**params)
+    assert len(result["frame_settings"][0]["blocked_edges"]) == 3
+    assert len(result["frame_settings"][1]["blocked_edges"]) == 3
+    assert result["frame_settings"][2]["blocked_edges"] == []
+    assert result["frame_settings"][3]["blocked_edges"] == []
+    # At step 2 the seam reopens: heat crosses into column 1.
+    assert all(result["frames"][2][r][1] > 0 for r in range(3))
+
+
+def test_no_schedule_response_carries_uniform_frame_settings():
+    result = simulate(
+        [[1, 0, 0], [0, 0, 0], [0, 0, 0]], 3, "insulated",
+        blocked_edges=[((0, 0), (0, 1))], schedule=[],
+    )
+    assert len(result["frame_settings"]) == 4
+    for setting in result["frame_settings"]:
+        assert setting["boundary"] == "insulated"
+        assert setting["blocked_edges"] == [((0, 0), (0, 1))]
+    assert result["boundary"] == "insulated"
+    assert result["blocked_edges"] == [((0, 0), (0, 1))]
+
+
+@pytest.mark.parametrize(
+    "schedule_entry",
+    [
+        {"boundary": "insulated"},                       # missing step
+        {"step": 0, "boundary": "insulated"},            # step out of range
+        {"step": 4, "boundary": "insulated"},            # beyond steps
+        {"step": "2", "boundary": "insulated"},          # non-int step
+        {"step": 1.5, "boundary": "insulated"},          # float step
+        {"step": 1, "boundary": "periodic"},             # bad boundary
+        {"step": 1},                                     # nothing to apply
+        {"step": 1, "blocked_edges": "nope"},            # edges not a list
+        {"step": 1, "blocked_edges": None},              # null instead of []
+        {"step": 1, "blocked_edges": [[0, 0, 0, 2]]},    # non-adjacent edge
+        {"step": 1, "blocked_edges": [[0, 0, 5, 0]]},    # out of grid
+        {"step": 1, "blocked_edges": [["x", 0, 0, 1]]},  # non-int coords
+        {"step": 1, "blocked_edges": [[[0, 0]]]},        # malformed edge
+        {"step": 1, "blocked_edges": [[0] * 4 for _ in range(31)]},
+    ],
+)
+def test_invalid_schedule_entries_rejected(schedule_entry):
+    payload = {
+        "matrix": GOOD,
+        "steps": 3,
+        "boundary": "insulated",
+        "schedule": [schedule_entry],
+    }
+    with pytest.raises(ValidationError):
+        validate_payload(payload)
+
+
+def test_duplicate_schedule_step_rejected():
+    payload = {
+        "matrix": GOOD,
+        "steps": 3,
+        "schedule": [
+            {"step": 2, "boundary": "fixed-zero"},
+            {"step": 2, "blocked_edges": []},
+        ],
+    }
+    with pytest.raises(ValidationError):
+        validate_payload(payload)
+
+
+def test_schedule_must_be_array():
+    with pytest.raises(ValidationError):
+        validate_payload({"matrix": GOOD, "steps": 2, "schedule": {"step": 1}})
+
+
+def test_schedule_api_malformed_entry_returns_400_not_500(client):
+    # Bad schedule shape previously leaked through validation and blew up the
+    # engine with a 500; it must be a clean 400 with an explanatory message.
+    resp = client.post(
+        "/api/simulate",
+        json={
+            "matrix": GOOD,
+            "steps": 3,
+            "schedule": [{"step": 2, "boundary": "nonsense"}],
+        },
+    )
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+
+def test_schedule_api_happy_path_returns_frame_settings(client):
+    resp = client.post("/api/simulate", json=SCHED_SCENARIO)
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["frame_settings"]) == 7
+    assert data["frame_settings"][0]["boundary"] == "insulated"
+    assert data["frame_settings"][3]["boundary"] == "fixed-zero"
+    assert data["frame_settings"][4]["boundary"] == "insulated"
+    assert data["frame_settings"][2]["blocked_edges"] == [
+        [[0, 0], [0, 1]],
+        [[1, 0], [1, 1]],
+        [[2, 0], [2, 1]],
+    ]
+    # Top-level echo reflects the controls at the end of the run.
+    assert data["boundary"] == "insulated"
+    assert len(data["blocked_edges"]) == 3
+

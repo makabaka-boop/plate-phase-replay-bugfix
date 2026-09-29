@@ -59,7 +59,14 @@ npm run dev                                 # http://localhost:5173
 
 ## 阶段设置
 
-请求可带 `schedule` 数组；各项包含 `step`（从 1 开始）及可选的 `boundary`、`blocked_edges`，页面提供 JSON 编辑框。
+请求可带 `schedule` 数组；各项包含 `step`（从 1 开始）及至少一个 `boundary`、`blocked_edges` 字段，页面提供 JSON 编辑框。
+
+- 阶段设置在**所指时间步开始之前**生效：`{"step": 3, "boundary": "fixed-zero"}` 表示第 3 步就按零温边界计算（第 1、2 步仍用初始边界），不会提前影响更早的帧。
+- `blocked_edges` 是**整表替换**：该步起阻断布局以新列表为准；传 `[]` 表示此前所有阻断边全部恢复传热；省略则沿用上一阶段。
+- 每个 `step` 至多出现一次，范围必须在 `1..steps`；任何格式错误都返回 `400 {"error": "..."}`，不会造成 500。
+- 无 `schedule` 或为空数组的原有请求行为完全不变。
+
+响应除顶层 `boundary` / `blocked_edges`（反映**最后一步结束时**仍在生效的设置）外，还带逐帧的 `frame_settings`（长度 `steps+1`）：第 0 项为请求默认设置，第 t 项（t≥1）是第 t 步开始前生效、并产出第 t 帧的边界与阻断布局。`frames[t]`、`boundary_flow[t-1]`、`total_temperature[t]` 与 `frame_settings[t]` 描述同一过程，恒有 `总温(t) − 总温(t+1) = boundary_flow[t]`。UI 据此逐帧绘制阻断线、逐行显示边界模式与净流量。
 
 ## API
 
@@ -84,13 +91,19 @@ npm run dev                                 # http://localhost:5173
   "frames": [[["40", "0", "0"], ...], ...],
   "boundary_flow": ["0", "0", ...],
   "total_temperature": ["120", ...],
-  "blocked_edges": [[[0, 0], [0, 1]]]
+  "blocked_edges": [[[0, 0], [0, 1]]],
+  "frame_settings": [
+    {"boundary": "insulated", "blocked_edges": [[[0, 0], [0, 1]]]},
+    ...
+  ],
+  "schedule": []
 }
 ```
 
 - `frames`：`steps+1` 帧（第 0 帧为初温），每格是精确有理数字符串；
 - `boundary_flow[t]`：第 t+1 步的边界**净**流量（正＝流向外界，负＝从环境吸热）；绝热时恒为 `"0"`；
-- `total_temperature`：每帧总温。
+- `total_temperature`：每帧总温；
+- `frame_settings[t]`：第 t 帧对应的实际生效设置（边界模式 + 阻断边），供逐帧可视化与逐步复核。
 
 非法输入返回 `400 {"error": "..."}`。
 

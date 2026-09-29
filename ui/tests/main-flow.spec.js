@@ -153,7 +153,7 @@ test("fixed-zero boundary shows nonzero net flow and loses total heat", async ({
 
   // First boundary flow (step 1): the plate has a hot column on the left.
   await expect(
-    page.getByTestId("stats-row-1").locator("td").nth(2)
+    page.getByTestId("stats-row-1").locator("td").nth(3)
   ).toHaveText(server.boundary_flow[0]);
 
   // Total at the final frame must match the server exactly and be below 120.
@@ -255,3 +255,160 @@ test("resize drops out-of-range blocked edges and trims cells", async ({
   await page.getByTestId("run-button").click();
   await expect(page.getByTestId("player")).toBeVisible();
 });
+
+// ---------------------------------------------------------------------------
+// Per-stage schedule
+// ---------------------------------------------------------------------------
+
+const SCHEDULE = [
+  { step: 2, blocked_edges: [[0, 0, 0, 1], [1, 0, 1, 1], [2, 0, 2, 1]] },
+  { step: 3, boundary: "fixed-zero" },
+  { step: 4, boundary: "insulated" },
+];
+
+test("schedule applies boundary and blocked edges exactly at their steps", async ({
+  page,
+  request,
+}) => {
+  const payload = {
+    matrix: INITIAL_MATRIX,
+    steps: 6,
+    boundary: "insulated",
+    blocked_edges: [],
+    schedule: SCHEDULE,
+  };
+  const server = await getServerFrames(request, payload);
+
+  await page
+    .getByTestId("schedule-input")
+    .fill(JSON.stringify(SCHEDULE));
+  await page.getByTestId("run-button").click();
+  await expect(page.getByTestId("player")).toBeVisible();
+
+  const bars = () =>
+    page.getByTestId("heatmap").locator("rect.edge-blocked");
+
+  // Frames 0 and 1: no blocked edges yet (seam is open during step 1).
+  for (const t of [0, 1]) {
+    await page.getByTestId("step-slider").fill(String(t));
+    await expect(bars()).toHaveCount(0);
+    await expect(page.getByTestId("frame-mode")).toContainText("绝热");
+    await expect(page.getByTestId(`stats-mode-${t}`)).toContainText("绝热");
+  }
+  // Frames 2..6: seam blocked (3 bars).
+  for (const t of [2, 3, 4, 5, 6]) {
+    await page.getByTestId("step-slider").fill(String(t));
+    await expect(bars()).toHaveCount(3);
+  }
+  // Boundary overlay follows the step: fixed-zero only on frame 3.
+  await page.getByTestId("step-slider").fill("2");
+  await expect(page.getByTestId("frame-mode")).toContainText("绝热");
+  await page.getByTestId("step-slider").fill("3");
+  await expect(page.getByTestId("frame-mode")).toContainText("零温");
+  await expect(page.getByTestId("stats-mode-3")).toContainText("零温");
+  await page.getByTestId("step-slider").fill("4");
+  await expect(page.getByTestId("frame-mode")).toContainText("绝热");
+
+  // Every rendered frame matches the corresponding server frame exactly.
+  for (let t = 0; t <= 6; t++) {
+    await page.getByTestId("step-slider").fill(String(t));
+    for (let r = 0; r < 3; r++) {
+      for (let c = 0; c < 4; c++) {
+        const actual = Number(
+          await page.getByTestId(`heat-${r}-${c}`).getAttribute("data-value")
+        );
+        expect(Math.abs(actual - frac(server.frames[t][r][c]))).toBeLessThan(
+          1e-9
+        );
+      }
+    }
+  }
+
+  // Per-step table: net flow column equals the server value for every row
+  // (displayed as a decimal approximation of the exact fraction).
+  for (let t = 1; t <= 6; t++) {
+    const flowText = await page
+      .getByTestId(`stats-row-${t}`)
+      .locator("td")
+      .nth(3)
+      .textContent();
+    expect(Math.abs(Number(flowText) - frac(server.boundary_flow[t - 1]))).toBeLessThan(
+      1e-3
+    );
+    const totalText = await page
+      .getByTestId(`stats-row-${t}`)
+      .locator("td")
+      .nth(1)
+      .textContent();
+    expect(Math.abs(Number(totalText) - frac(server.total_temperature[t]))).toBeLessThan(
+      1e-3
+    );
+  }
+  // Server truth: only step 3 leaks heat; steps 1-2 and 4-6 conserve total.
+  expect(frac(server.boundary_flow[0])).toBe(0);
+  expect(frac(server.boundary_flow[1])).toBe(0);
+  expect(frac(server.boundary_flow[2])).toBeGreaterThan(0);
+  for (const i of [3, 4, 5]) expect(frac(server.boundary_flow[i])).toBe(0);
+});
+
+test("editing schedule invalidates the old heatmap immediately", async ({
+  page,
+}) => {
+  await page
+    .getByTestId("schedule-input")
+    .fill(JSON.stringify(SCHEDULE));
+  await page.getByTestId("run-button").click();
+  await expect(page.getByTestId("player")).toBeVisible();
+
+  // Touch the schedule text: the stale frames must disappear at once.
+  await page
+    .getByTestId("schedule-input")
+    .fill(JSON.stringify([{ step: 1, boundary: "fixed-zero" }]));
+  await expect(page.getByTestId("stale-hint")).toBeVisible();
+  await expect(page.getByTestId("player")).not.toBeVisible();
+  await expect(page.getByTestId("stats-panel")).not.toBeVisible();
+});
+
+test("invalid schedule JSON is reported inline and run stays responsive", async ({
+  page,
+}) => {
+  await page.getByTestId("schedule-input").fill("[{not json");
+  await page.getByTestId("run-button").click();
+  await expect(page.getByTestId("error-box")).toBeVisible();
+  await expect(page.getByTestId("error-box")).toContainText("JSON");
+  await expect(page.getByTestId("player")).not.toBeVisible();
+
+  // A non-array JSON value is also rejected cleanly.
+  await page.getByTestId("schedule-input").fill('{"step": 2}');
+  await page.getByTestId("run-button").click();
+  await expect(page.getByTestId("error-box")).toContainText("数组");
+
+  // Fix it: the button is still responsive and a valid run works.
+  await page.getByTestId("schedule-input").fill("[]");
+  await page.getByTestId("run-button").click();
+  await expect(page.getByTestId("player")).toBeVisible();
+  await expect(page.getByTestId("error-box")).not.toBeVisible();
+});
+
+test("server rejects malformed schedule entry with 400, surfaced in UI", async ({
+  page,
+  request,
+}) => {
+  const resp = await request.post("/api/simulate", {
+    data: {
+      matrix: INITIAL_MATRIX,
+      steps: 3,
+      schedule: [{ step: 2, boundary: "nonsense" }],
+    },
+  });
+  expect(resp.status()).toBe(400);
+
+  // The same bad-but-valid-JSON payload shows the server message, no hang.
+  await page
+    .getByTestId("schedule-input")
+    .fill(JSON.stringify([{ step: 2, boundary: "nonsense" }]));
+  await page.getByTestId("run-button").click();
+  await expect(page.getByTestId("error-box")).toBeVisible();
+  await expect(page.getByTestId("player")).not.toBeVisible();
+});
+
