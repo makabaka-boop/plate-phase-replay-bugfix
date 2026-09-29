@@ -1,0 +1,22 @@
+services:
+  plate-api:
+    build:
+      context: ./backend
+    container_name: plate-api
+    ports:
+      - "5000:5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  plate-ui:
+    build:
+      context: ./ui
+    container_name: plate-ui
+    ports:
+      - "8080:80"
+    depends_on:
+      plate-api:
+        condition: service_healthy
